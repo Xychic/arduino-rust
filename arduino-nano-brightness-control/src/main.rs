@@ -3,13 +3,17 @@
 #![feature(abi_avr_interrupt)]
 
 use arduino_hal::{
-    delay_ms,
+    pac::{TC1, TC2},
+    prelude::*,
+};
+use panic_halt as _;
+
+use arduino_hal::{
     hal::port::Dynamic,
     port::{
         mode::{Input, PullUp},
         Pin,
     },
-    prelude::*,
 };
 use core::cell;
 use panic_halt as _;
@@ -113,57 +117,111 @@ impl Button<'_> {
     }
 }
 
+fn set_timer_1(tc1: &TC1) {
+    tc1.tccr1a
+        .write(|w| w.wgm1().bits(0b01).com1b().match_clear());
+    tc1.tccr1b.write(|w| w.wgm1().bits(0b01).cs1().prescale_8());
+}
+
+fn clear_timer_1(tc1: &TC1) {
+    tc1.tccr1a.reset();
+    tc1.tccr1b.reset();
+}
+
+fn set_timer_2(tc2: &TC2) {
+    tc2.tccr2a
+        .write(|w| w.wgm2().bits(0b01).com2a().match_clear());
+    tc2.tccr2b
+        .write(|w| w.wgm22().bit(false).cs2().prescale_8());
+}
+
+fn clear_timer_2(tc2: &TC2) {
+    tc2.tccr2a.reset();
+    tc2.tccr2b.reset();
+}
+
 #[arduino_hal::entry]
 fn main() -> ! {
     let peripherals = arduino_hal::Peripherals::take().unwrap();
     let pins = arduino_hal::pins!(peripherals);
     let mut serial = arduino_hal::default_serial!(peripherals, pins, 9600);
+    let mut adc = arduino_hal::Adc::new(peripherals.ADC, Default::default());
+
+    let pot_pin = pins.a0.into_analog_input(&mut adc);
+    let button_pin = pins.d8.into_pull_up_input().downgrade();
     let mut yellow_led_pin = pins.d9.into_output();
     let mut red_led_pin = pins.d10.into_output();
     let mut green_led_pin = pins.d11.into_output();
-    let button_pin = pins.d8.into_pull_up_input().downgrade();
+
+    let mut on = false;
     let mut button = Button::new(&button_pin);
+
+    let mut temp = 0;
+    let mut brightness = 0;
+    let mut red;
+    let mut green;
 
     // For millis to work
     millis_init(peripherals.TC0);
     unsafe { avr_device::interrupt::enable() };
 
-    ufmt::uwriteln!(&mut serial, "Finished Setup!").void_unwrap();
+    ufmt::uwriteln!(&mut serial, "Hello from Arduino!").void_unwrap();
 
     loop {
+        arduino_hal::delay_ms(100);
         button.update();
-
-        // led_pin.toggle();
-        // arduino_hal::delay_ms(1000);
-        // ufmt::uwriteln!(&mut serial, "Button pressed: {}", button_pin.is_low()).void_unwrap();
-        ufmt::uwriteln!(&mut serial, "Time: {}", millis()).void_unwrap();
-        ufmt::uwriteln!(
-            &mut serial,
-            "Status: {}, Last Down: {}, Last Up: {}",
-            button.state,
-            button.last_down,
-            button.last_up
-        )
-        .void_unwrap();
+        let pot_val = adc.read_blocking(&pot_pin);
 
         if button.is_pressed() {
             yellow_led_pin.set_high();
         } else {
             yellow_led_pin.set_low();
         }
-
-        if button.is_held(1000) {
-            green_led_pin.set_high();
+        if button.was_bumped(500) {
+            on = !on;
+            ufmt::uwriteln!(&mut serial, "On/off : {}", if on { "on" } else { "off" })
+                .void_unwrap();
+        } else if button.is_held(500) {
+            temp = pot_val / 4;
         } else {
-            green_led_pin.set_low();
+            brightness = pot_val / 4;
         }
 
-        if button.was_bumped(1000) {
+        red = temp * brightness / 255;
+        green = ((255 - temp) * brightness / 255) as u8;
+
+        ufmt::uwriteln!(&mut serial, "Pot: {}", pot_val).void_unwrap();
+        ufmt::uwriteln!(&mut serial, "On: {}", on).void_unwrap();
+        ufmt::uwriteln!(&mut serial, "Temp: {}", temp).void_unwrap();
+        ufmt::uwriteln!(&mut serial, "Brightness: {}", brightness).void_unwrap();
+        ufmt::uwriteln!(&mut serial, "Brightness Red: {}", red).void_unwrap();
+        ufmt::uwriteln!(&mut serial, "Brightness Green: {}", green).void_unwrap();
+        ufmt::uwriteln!(&mut serial, "").void_unwrap();
+
+        clear_timer_1(&peripherals.TC1);
+        clear_timer_2(&peripherals.TC2);
+        if !on {
+            red_led_pin.set_low();
+            green_led_pin.set_low();
+            continue;
+        }
+
+        if red == 0 {
+            red_led_pin.set_low();
+        } else if red == 255 {
             red_led_pin.set_high();
         } else {
-            red_led_pin.set_low();
+            set_timer_1(&peripherals.TC1);
+            peripherals.TC1.ocr1b.write(|w| unsafe { w.bits(red) });
         }
 
-        delay_ms(50);
+        if green == 0 {
+            green_led_pin.set_low();
+        } else if green == 255 {
+            green_led_pin.set_high();
+        } else {
+            set_timer_2(&peripherals.TC2);
+            peripherals.TC2.ocr2a.write(|w| unsafe { w.bits(green) });
+        }
     }
 }
