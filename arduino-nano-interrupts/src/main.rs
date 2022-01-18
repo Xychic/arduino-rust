@@ -14,36 +14,17 @@ use arduino_hal::{
 use panic_halt as _;
 
 use core::{
-    mem,
-    sync::atomic::{compiler_fence, AtomicBool, Ordering},
+    cell, mem,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 static TMR_OVERFLOW: AtomicBool = AtomicBool::new(false);
 static ROTARY_CHANGE: AtomicBool = AtomicBool::new(false);
+static VAL: avr_device::interrupt::Mutex<cell::Cell<u16>> =
+    avr_device::interrupt::Mutex::new(cell::Cell::new(0));
 
 static mut ROTARY_PINS: mem::MaybeUninit<[Pin<Input<PullUp>, Dynamic>; 2]> =
     mem::MaybeUninit::uninit();
-static mut VAL: u16 = 0;
-
-#[avr_device::interrupt(atmega328p)]
-#[allow(non_snake_case)]
-fn TIMER1_COMPA() {
-    TMR_OVERFLOW.store(true, Ordering::SeqCst);
-}
-
-#[avr_device::interrupt(atmega328p)]
-unsafe fn PCINT2() {
-    ROTARY_CHANGE.store(true, Ordering::SeqCst);
-    let rotary_pins = &*ROTARY_PINS.as_ptr();
-    if rotary_pins[1].is_low() {
-        // Detect Rising edge
-        if rotary_pins[0].is_low() && VAL < u16::MAX {
-            VAL += 1;
-        } else if rotary_pins[0].is_high() && VAL > 0 {
-            VAL -= 1;
-        }
-    }
-}
 
 #[arduino_hal::entry]
 fn main() -> ! {
@@ -52,7 +33,6 @@ fn main() -> ! {
     let mut serial = arduino_hal::default_serial!(peripherals, pins, 9600);
 
     unsafe {
-        compiler_fence(Ordering::SeqCst);
         ROTARY_PINS = mem::MaybeUninit::new([
             pins.d8.into_pull_up_input().downgrade(),
             pins.d2.into_pull_up_input().downgrade(),
@@ -71,20 +51,53 @@ fn main() -> ! {
     peripherals.EXINT.pcmsk2.write(|w| unsafe { w.bits(0b100) });
 
     unsafe {
-        compiler_fence(Ordering::SeqCst);
         avr_device::interrupt::enable();
     }
 
     ufmt::uwriteln!(&mut serial, "Finished Setup!").void_unwrap();
     loop {
-        if changed(&TMR_OVERFLOW) {
-            ufmt::uwriteln!(&mut serial, "Timer!").void_unwrap();
-            if changed(&ROTARY_CHANGE) {
-                ufmt::uwriteln!(&mut serial, "Val: {}", unsafe { VAL }).void_unwrap();
-            }
+        // if changed(&TMR_OVERFLOW) {
+        //     ufmt::uwriteln!(&mut serial, "Timer!").void_unwrap();
+        // }
+        if changed(&ROTARY_CHANGE) {
+            ufmt::uwriteln!(&mut serial, "Val: {}", get_from_mutex(&VAL)).void_unwrap();
         }
         delay_ms(50);
     }
+}
+
+#[avr_device::interrupt(atmega328p)]
+#[allow(non_snake_case)]
+fn TIMER1_COMPA() {
+    TMR_OVERFLOW.store(true, Ordering::SeqCst);
+}
+
+#[avr_device::interrupt(atmega328p)]
+#[allow(non_snake_case)]
+unsafe fn PCINT2() {
+    let rotary_pins = &*ROTARY_PINS.as_ptr();
+    // Detect Rising edge
+    if rotary_pins[1].is_low() {
+        // Store the fact that a change has been detected
+        ROTARY_CHANGE.store(true, Ordering::SeqCst);
+        avr_device::interrupt::free(|cs| {
+            // Get the current value from the atomic
+            let val_cell = VAL.borrow(cs);
+            let val = val_cell.get();
+            if rotary_pins[0].is_low() && val < u16::MAX {
+                val_cell.set(val + 1);
+            } else if rotary_pins[0].is_high() && val > 0 {
+                val_cell.set(val - 1);
+            }
+        });
+    }
+}
+
+fn get_from_mutex<T>(mutex: &avr_device::interrupt::Mutex<cell::Cell<T>>) -> T
+where
+    T: Copy,
+{
+    avr_device::interrupt::free(|cs| mutex.borrow(cs).get())
 }
 
 fn changed(var: &AtomicBool) -> bool {
