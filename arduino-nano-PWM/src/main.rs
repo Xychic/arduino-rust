@@ -40,13 +40,28 @@ fn main() -> ! {
         ROTARY_PINS.borrow(cs).set(MaybeUninit::new(rotary_pins));
     });
 
+    let _red_led_pin = pins.d9.into_output();
+    let _green_led_pin = pins.d10.into_output();
+
     let timer1 = peripherals.TC1;
-    timer1.tccr1a.write(|w| unsafe { w.bits(0) });
-    timer1.tccr1b.write(|w| w.cs1().prescale_256());
-    timer1.ocr1a.write(|w| unsafe { w.bits(62499) });
-    timer1.tcnt1.write(|w| unsafe { w.bits(0) });
-    // Enable the timer interrupt
-    timer1.timsk1.write(|w| w.ocie1a().set_bit());
+    // timer1
+    //     .tccr1a
+    //     .write(|w| w.wgm1().bits(0b01).com1a().match_clear());
+    // timer1
+    //     .tccr1b
+    //     .write(|w| w.wgm1().bits(0b01).cs1().prescale_256());
+
+    timer1.tccr1a.write(|w| {
+        w.wgm1()
+            .bits(0b10)
+            .com1a()
+            .match_clear()
+            .com1b()
+            .match_clear()
+    });
+    timer1
+        .tccr1b
+        .write(|w| w.wgm1().bits(0b00).cs1().prescale_256());
 
     peripherals.EXINT.pcicr.write(|w| unsafe { w.bits(0b100) });
     peripherals.EXINT.pcmsk2.write(|w| unsafe { w.bits(0b100) });
@@ -61,16 +76,13 @@ fn main() -> ! {
         //     ufmt::uwriteln!(&mut serial, "Timer!").void_unwrap();
         // }
         if changed(&ROTARY_CHANGE) {
-            ufmt::uwriteln!(&mut serial, "Val: {}", get_from_mutex(&VAL)).void_unwrap();
+            let val = get_from_mutex(&VAL);
+            ufmt::uwriteln!(&mut serial, "Val: {}", val).void_unwrap();
+            timer1.ocr1a.write(|w| unsafe { w.bits(val) });
+            timer1.ocr1b.write(|w| unsafe { w.bits(511 - val) });
         }
         delay_ms(50);
     }
-}
-
-#[avr_device::interrupt(atmega328p)]
-#[allow(non_snake_case)]
-fn TIMER1_COMPA() {
-    TMR_OVERFLOW.store(true, Ordering::SeqCst);
 }
 
 #[avr_device::interrupt(atmega328p)]
@@ -82,7 +94,7 @@ fn PCINT2() {
             ROTARY_CHANGE.store(true, Ordering::SeqCst);
             let val_cell = VAL.borrow(cs);
             let val = val_cell.get();
-            if rotary_pins[0].is_low() && val < u16::MAX {
+            if rotary_pins[0].is_low() && val < 511 {
                 val_cell.set(val + 1);
             } else if rotary_pins[0].is_high() && val > 0 {
                 val_cell.set(val - 1);
