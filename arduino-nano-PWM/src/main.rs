@@ -42,6 +42,8 @@ static VAL: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
 static ROTARY_PINS: Mutex<Cell<MaybeUninit<[Pin<Input<PullUp>, Dynamic>; 2]>>> =
     Mutex::new(Cell::new(MaybeUninit::uninit()));
 const PWM_ACCURACY: PWMAccuracy = PWMAccuracy::HIGH;
+const BRIGHTNESS_STEP: u16 = 10;
+
 
 #[arduino_hal::entry]
 fn main() -> ! {
@@ -116,10 +118,10 @@ fn PCINT2() {
             ROTARY_CHANGE.store(true, Ordering::SeqCst);
             let val_cell = VAL.borrow(cs);
             let val = val_cell.get();
-            if rotary_pins[0].is_low() && val < PWM_ACCURACY.val() {
-                val_cell.set(val + 1);
-            } else if rotary_pins[0].is_high() && val > 0 {
-                val_cell.set(val - 1);
+            if rotary_pins[0].is_low() {
+                val_cell.set(PWM_ACCURACY.val().min(val + BRIGHTNESS_STEP));
+            } else if rotary_pins[0].is_high() {
+                val_cell.set(if val > BRIGHTNESS_STEP { val - BRIGHTNESS_STEP } else { 0 });
             }
         }
     });
