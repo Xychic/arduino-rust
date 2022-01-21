@@ -42,8 +42,7 @@ static VAL: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
 static ROTARY_PINS: Mutex<Cell<MaybeUninit<[Pin<Input<PullUp>, Dynamic>; 2]>>> =
     Mutex::new(Cell::new(MaybeUninit::uninit()));
 const PWM_ACCURACY: PWMAccuracy = PWMAccuracy::HIGH;
-const BRIGHTNESS_STEP: u16 = 10;
-
+const BRIGHTNESS_STEP: u16 = 25;
 
 #[arduino_hal::entry]
 fn main() -> ! {
@@ -99,11 +98,12 @@ fn main() -> ! {
         // }
         if changed(&ROTARY_CHANGE) {
             let val = get_from_mutex(&VAL);
-            ufmt::uwriteln!(&mut serial, "Val: {}", val).void_unwrap();
-            timer1.ocr1a.write(|w| unsafe { w.bits(val) });
-            timer1
-                .ocr1b
-                .write(|w| unsafe { w.bits(PWM_ACCURACY.val() - val) });
+            let red = PWM_ACCURACY.val().min(val);
+            let green = PWM_ACCURACY.val().min((PWM_ACCURACY.val() * 2) - val);
+            ufmt::uwriteln!(&mut serial, "Val: {}\tRed: {}\tGreen: {}", val, red, green)
+                .void_unwrap();
+            timer1.ocr1a.write(|w| unsafe { w.bits(red) });
+            timer1.ocr1b.write(|w| unsafe { w.bits(green) });
         }
         delay_ms(50);
     }
@@ -119,9 +119,13 @@ fn PCINT2() {
             let val_cell = VAL.borrow(cs);
             let val = val_cell.get();
             if rotary_pins[0].is_low() {
-                val_cell.set(PWM_ACCURACY.val().min(val + BRIGHTNESS_STEP));
+                val_cell.set((PWM_ACCURACY.val() * 2).min(val + BRIGHTNESS_STEP));
             } else if rotary_pins[0].is_high() {
-                val_cell.set(if val > BRIGHTNESS_STEP { val - BRIGHTNESS_STEP } else { 0 });
+                val_cell.set(if val > BRIGHTNESS_STEP {
+                    val - BRIGHTNESS_STEP
+                } else {
+                    0
+                });
             }
         }
     });
