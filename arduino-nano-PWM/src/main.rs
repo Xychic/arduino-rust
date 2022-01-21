@@ -20,11 +20,28 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-static TMR_OVERFLOW: AtomicBool = AtomicBool::new(false);
+#[allow(dead_code)]
+enum PWMAccuracy {
+    LOW,
+    MEDIUM,
+    HIGH,
+}
+
+impl PWMAccuracy {
+    fn val(&self) -> u16 {
+        match self {
+            PWMAccuracy::LOW => 255,
+            PWMAccuracy::MEDIUM => 511,
+            PWMAccuracy::HIGH => 1023,
+        }
+    }
+}
+
 static ROTARY_CHANGE: AtomicBool = AtomicBool::new(false);
 static VAL: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
 static ROTARY_PINS: Mutex<Cell<MaybeUninit<[Pin<Input<PullUp>, Dynamic>; 2]>>> =
     Mutex::new(Cell::new(MaybeUninit::uninit()));
+const PWM_ACCURACY: PWMAccuracy = PWMAccuracy::HIGH;
 
 #[arduino_hal::entry]
 fn main() -> ! {
@@ -44,24 +61,27 @@ fn main() -> ! {
     let _green_led_pin = pins.d10.into_output();
 
     let timer1 = peripherals.TC1;
-    // timer1
-    //     .tccr1a
-    //     .write(|w| w.wgm1().bits(0b01).com1a().match_clear());
-    // timer1
-    //     .tccr1b
-    //     .write(|w| w.wgm1().bits(0b01).cs1().prescale_256());
-
     timer1.tccr1a.write(|w| {
         w.wgm1()
-            .bits(0b10)
+            .bits(match PWM_ACCURACY {
+                PWMAccuracy::LOW => 0b01,
+                PWMAccuracy::MEDIUM => 0b10,
+                PWMAccuracy::HIGH => 0b11,
+            })
             .com1a()
             .match_clear()
             .com1b()
             .match_clear()
     });
+    timer1.tccr1b.write(|w| match PWM_ACCURACY {
+        PWMAccuracy::LOW => w.wgm1().bits(0b00).cs1().prescale_256(),
+        PWMAccuracy::MEDIUM => w.wgm1().bits(0b00).cs1().prescale_256(),
+        PWMAccuracy::HIGH => w.wgm1().bits(0b00).cs1().prescale_64(),
+    });
+
     timer1
-        .tccr1b
-        .write(|w| w.wgm1().bits(0b00).cs1().prescale_256());
+        .ocr1b
+        .write(|w| unsafe { w.bits(PWM_ACCURACY.val()) });
 
     peripherals.EXINT.pcicr.write(|w| unsafe { w.bits(0b100) });
     peripherals.EXINT.pcmsk2.write(|w| unsafe { w.bits(0b100) });
@@ -79,7 +99,9 @@ fn main() -> ! {
             let val = get_from_mutex(&VAL);
             ufmt::uwriteln!(&mut serial, "Val: {}", val).void_unwrap();
             timer1.ocr1a.write(|w| unsafe { w.bits(val) });
-            timer1.ocr1b.write(|w| unsafe { w.bits(511 - val) });
+            timer1
+                .ocr1b
+                .write(|w| unsafe { w.bits(PWM_ACCURACY.val() - val) });
         }
         delay_ms(50);
     }
@@ -94,7 +116,7 @@ fn PCINT2() {
             ROTARY_CHANGE.store(true, Ordering::SeqCst);
             let val_cell = VAL.borrow(cs);
             let val = val_cell.get();
-            if rotary_pins[0].is_low() && val < 511 {
+            if rotary_pins[0].is_low() && val < PWM_ACCURACY.val() {
                 val_cell.set(val + 1);
             } else if rotary_pins[0].is_high() && val > 0 {
                 val_cell.set(val - 1);
