@@ -43,6 +43,7 @@ static BRIGHTNESS: Mutex<Cell<u16>> = Mutex::new(Cell::new(1));
 static ROTARY_PINS: Mutex<Cell<MaybeUninit<[Pin<Input<PullUp>, Dynamic>; 3]>>> =
     Mutex::new(Cell::new(MaybeUninit::uninit()));
 static MILLIS_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
+static POWERED: AtomicBool = AtomicBool::new(false);
 
 const PWM_ACCURACY: PWMAccuracy = PWMAccuracy::HIGH;
 const TEMP_STEP: u16 = 25;
@@ -96,7 +97,6 @@ fn main() -> ! {
     millis_init(peripherals.TC0);
 
     let mut prev_button_state = false;
-    let mut powered = false;
     let mut last_up = 0;
     let mut last_down = 0;
 
@@ -112,6 +112,7 @@ fn main() -> ! {
         if changed(&ROTARY_CHANGE) {
             let temp = get_from_mutex(&TEMP);
             let brightness = get_from_mutex(&BRIGHTNESS);
+            ufmt::uwriteln!(&mut serial, "Powered: {}", from_atomic(&POWERED)).void_unwrap();
             let red =
                 PWM_ACCURACY.val().min(temp) as u32 * brightness as u32 / PWM_ACCURACY.val() as u32;
             let green = PWM_ACCURACY.val().min((PWM_ACCURACY.val() * 2) - temp) as u32
@@ -128,10 +129,14 @@ fn main() -> ! {
             .void_unwrap();
             timer1
                 .ocr1a
-                .write(|w| unsafe { w.bits(if powered { red as u16 } else { 0 }) });
-            timer1
-                .ocr1b
-                .write(|w| unsafe { w.bits(if powered { green as u16 } else { 0 }) });
+                .write(|w| unsafe { w.bits(if from_atomic(&POWERED) { red as u16 } else { 0 }) });
+            timer1.ocr1b.write(|w| unsafe {
+                w.bits(if from_atomic(&POWERED) {
+                    green as u16
+                } else {
+                    0
+                })
+            });
         } else {
             avr_device::interrupt::free(|cs| {
                 let rotary_pins = unsafe { &*(&*ROTARY_PINS.borrow(cs).as_ptr()).as_ptr() };
@@ -148,7 +153,7 @@ fn main() -> ! {
                         ufmt::uwriteln!(&mut serial, "Bumped!").void_unwrap();
 
                         ROTARY_CHANGE.store(true, Ordering::SeqCst);
-                        powered = !powered;
+                        POWERED.store(!from_atomic(&POWERED), Ordering::SeqCst);
                     }
                     prev_button_state = false;
                 }
@@ -167,6 +172,7 @@ fn PCINT2() {
             // Change Temperature when held down
             if rotary_pins[0].is_low() {
                 ROTARY_CHANGE.store(true, Ordering::SeqCst);
+                POWERED.store(true, Ordering::SeqCst);
                 let temp_cell = TEMP.borrow(cs);
                 let temp = temp_cell.get();
                 if rotary_pins[1].is_high() {
@@ -183,6 +189,7 @@ fn PCINT2() {
             // Change brightness
             if rotary_pins[0].is_low() {
                 ROTARY_CHANGE.store(true, Ordering::SeqCst);
+                POWERED.store(true, Ordering::SeqCst);
                 let brightness_cell = BRIGHTNESS.borrow(cs);
                 let brightness = brightness_cell.get();
                 if rotary_pins[1].is_high() {
@@ -204,14 +211,16 @@ fn get_from_mutex<T: Copy>(mutex: &Mutex<Cell<T>>) -> T {
 }
 
 fn changed(var: &AtomicBool) -> bool {
-    avr_device::interrupt::free(|_cs| {
-        if var.load(Ordering::SeqCst) {
-            var.store(false, Ordering::SeqCst);
-            true
-        } else {
-            false
-        }
-    })
+    if from_atomic(var) {
+        var.store(false, Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
+fn from_atomic(var: &AtomicBool) -> bool {
+    avr_device::interrupt::free(|_cs| var.load(Ordering::SeqCst))
 }
 
 fn millis_init(tc0: arduino_hal::pac::TC0) {
